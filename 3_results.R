@@ -11,8 +11,8 @@ library(labelled)
 rm(list = ls())
 
 # 1. Load Data ----
-load("Data/reg_results.Rdata")
 load("Data/df_analysis.Rdata")
+load("Data/reg_results.Rdata")
 load("Data/spline_results.Rdata")
 
 cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", 
