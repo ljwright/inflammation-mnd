@@ -63,7 +63,7 @@ main_res <- reg_grid %>%
   filter(str_detect(term, crp))
 
 
-# 5. Regression Dilution ----
+# 3. Regression Dilution ----
 # Model Function
 get_boot <- function(boot, outcome, crp, mod, low, covars){
   set.seed(boot)
@@ -139,7 +139,14 @@ save(main_res, dilut_res, covars,
      file = "Data/reg_results.Rdata")
 
 
-# 3. Splines ----
+# 4. Splines ----
+df_s <- df_cox %>%
+  select(crp, matches("^ns_")) %>%
+  arrange(crp) %>%
+  distinct() %>%
+  pivot_longer(-crp)
+
+# Bootstraps
 get_splines <- function(outcome, mod, low, covars){
   df_cox <- df_cox %>%
     filter(crp >= !!low)
@@ -194,13 +201,56 @@ spline_res <- reg_grid %>%
 future:::ClusterRegistry("stop")
 toc()
 
-save(spline_res, file = "Data/spline_results.Rdata")
+save(spline_res, df_s, file = "Data/spline_results.Rdata")
 
 
-# df_s <- df_cox %>%
-#   select(crp, matches("^ns_")) %>%
-#   arrange(crp) %>%
-#   distinct() %>%
-#   pivot_longer(-crp)
-# ADD COLUMN FOR CI IF I NEED IT
-# ADD ROW WITH ORIGINAL DATA TOO
+# Delta Method
+get_delta <- function(outcome, mod, low){
+  df_reg <- df_cox %>%
+    filter(crp >= !!low)
+  
+  mod_form <- glue("Surv(time_{outcome}, event_{outcome}) ~
+                   ns_1 + ns_2 + ns_3 + {glue_collapse(covars[[mod]], ' + ')}")
+  
+  mod <- as.formula(mod_form) %>%
+            coxph(df_reg)
+  
+  # Get Delta SE
+  vars <- names(coef(mod))
+  coefs <- coef(mod)[str_detect(vars, "^ns_")]
+  vcovs <- vcov(mod)[str_detect(vars, "^ns_"),
+                     str_detect(vars, "^ns_")]
+  
+  df_s %>%
+    arrange(crp, name) %>%
+    group_by(crp) %>%
+    mutate(delta = glue("{value}*x{row_number()}") %>%
+             glue_collapse(" + ") %>%
+             paste0("~ exp(", ., ")")) %>%
+    ungroup() %>%
+    nest(lincom = c(name, value)) %>%
+    mutate(lincom = map(lincom, deframe),
+           delta = map(delta, as.formula)) %>%
+    mutate(beta = map_dbl(lincom, ~ sum(.x * coefs) %>% exp()),
+           se = deltamethod(delta, coefs, vcovs),
+           lci = qnorm(.025, beta, se),
+           uci = qnorm(.975, beta, se)) %>%
+    select(-delta, -lincom)
+}
+
+delta_res <- reg_grid %>%
+  distinct(outcome, mod, low) %>%
+  mutate(res = pmap(list(outcome, mod, low), get_delta)) %>%
+  unnest(res)
+
+save(delta_res, df_s, file = "Data/delta_results.Rdata")
+
+delta_res %>%
+  filter(low == -Inf) %>%
+  ggplot() +
+  aes(x = crp, y = beta, ymin = lci, ymax = uci,
+      color = mod, fill = mod) +
+  facet_wrap(~ outcome, scales = "free_y") +
+  geom_hline(yintercept = 1) +
+  geom_ribbon(color = NA, alpha = 0.2) +
+  geom_line()
