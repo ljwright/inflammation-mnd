@@ -35,6 +35,12 @@ reg_grid <- expand_grid(outcome = c("hosp", "dead"),
                         mod = names(covars),
                         low = c(-Inf, 0.1))
 
+get_ci <- function(estimates){
+  quantile(estimates, c(.5, .025, .975)) %>%
+    as_tibble_row() %>%
+    rename(beta = 1, lci = 2, uci = 3)
+}
+
 save(df_cox, df_fu, covars, reg_grid,
      file = "Data/df_regressions.Rdata")
 
@@ -110,12 +116,6 @@ get_boot <- function(boot, outcome, crp, mod, low, covars){
   return(out)
 }
 
-get_ci <- function(estimates){
-  quantile(estimates, c(.5, .025, .975)) %>%
-    as_tibble_row() %>%
-    rename(beta = 1, lci = 2, uci = 3)
-}
-
 
 # Run Models
 tic()
@@ -147,12 +147,13 @@ df_s <- df_cox %>%
   pivot_longer(-crp)
 
 # Bootstraps
-get_splines <- function(outcome, mod, low, covars){
+get_splines <- function(outcome, mod, low){
   df_cox <- df_cox %>%
     filter(crp >= !!low)
   
+  mod_form <- glue_collapse(covars[[mod]], ' + ')
   mod_form <- glue("Surv(time_{outcome}, event_{outcome}) ~
-                   ns_1 + ns_2 + ns_3 + {glue_collapse(covars[[mod]], ' + ')}")
+                   ns_1 + ns_2 + ns_3 + {mod_form}")
   
   get_coefs <- function(boot, df_cox, mod_form){
     set.seed(boot)
@@ -167,7 +168,7 @@ get_splines <- function(outcome, mod, low, covars){
           as.formula(mod_form) %>%
             coxph(df_reg) %>%
             coef() %>%
-            enframe() %>%
+            enframe(value = "coef") %>%
             filter(str_detect(name, "^ns_"))
         },
         error = function(cond) {
@@ -196,12 +197,34 @@ plan(multisession, workers = 8)
 spline_res <- reg_grid %>%
   distinct(outcome, mod, low) %>%
   mutate(res = future_pmap(list(outcome, mod, low),
-                           get_splines, covars,
-                           .progress = TRUE))
+                           get_splines, 
+                           .progress = TRUE,
+                           .options = furrr_options(seed = NULL)))
 future:::ClusterRegistry("stop")
 toc()
 
-save(spline_res, df_s, file = "Data/spline_results.Rdata")
+get_splines_obs <- function(outcome, mod, low){
+  df_cox <- df_cox %>%
+    filter(crp >= !!low)
+  
+  mod_form <- glue_collapse(covars[[mod]], ' + ')
+  mod_form <- glue("Surv(time_{outcome}, event_{outcome}) ~
+                   ns_1 + ns_2 + ns_3 + {mod_form}")
+  
+  as.formula(mod_form) %>%
+    coxph(df_cox) %>%
+    coef() %>%
+    enframe(value = "coef") %>%
+    filter(str_detect(name, "^ns_"))
+}
+
+spline_obs <- reg_grid %>%
+  distinct(outcome, mod, low) %>%
+  mutate(res = pmap(list(outcome, mod, low),
+                           get_splines_obs))
+
+save(spline_res, spline_obs, df_s, get_ci,
+     file = "Data/spline_results.Rdata")
 
 
 # Delta Method
@@ -244,13 +267,3 @@ delta_res <- reg_grid %>%
   unnest(res)
 
 save(delta_res, df_s, file = "Data/delta_results.Rdata")
-
-delta_res %>%
-  filter(low == -Inf) %>%
-  ggplot() +
-  aes(x = crp, y = beta, ymin = lci, ymax = uci,
-      color = mod, fill = mod) +
-  facet_wrap(~ outcome, scales = "free_y") +
-  geom_hline(yintercept = 1) +
-  geom_ribbon(color = NA, alpha = 0.2) +
-  geom_line()

@@ -14,6 +14,7 @@ rm(list = ls())
 load("Data/df_analysis.Rdata")
 load("Data/reg_results.Rdata")
 load("Data/spline_results.Rdata")
+load("Data/delta_results.Rdata")
 
 cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", 
                "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
@@ -57,7 +58,6 @@ pretty_lbls <- look_for(df) %>%
 # Create Table
 desc <- list()
 
-
 get_p <- function(var){
   df_desc$rev_crp3 <- factor(df_desc$rev_crp3)
   
@@ -96,6 +96,8 @@ desc$df <- get_desc(df_desc, group_var = "rev_crp3") %>%
 
 desc$flx <- make_flx(desc$df) %>%
   align(j = 2:4, align = "center", part = "all")
+desc$flx
+save_as_docx(desc$flx, path = "Tables/descriptives.docx")
 
 # 3. Reliability ----
 get_cor <- function(low, method){
@@ -117,6 +119,12 @@ expand_grid(low = c(-Inf, 0.1),
 
 
 # 4. Regression Plots ----
+save_gg <- function(file_name, p, height = 9.9, width = 21){
+  glue("Images/{file_name}.png") %>%
+    ggsave(plot = p, height = height, width = width,
+           units = "cm")
+}
+
 lin_res <- bind_rows(
   main = main_res,
   dilut = dilut_res %>%
@@ -140,7 +148,7 @@ plot_point <- function(df, var){
     geom_hline(yintercept = 1) +
     geom_pointrange(position = position_dodge(0.5)) +
     scale_y_log10() +
-    scale_color_brewer(palette = "Set1") +
+    scale_color_brewer(palette = "Dark2") +
     theme_minimal() +
     theme(legend.position = c(0.1, 0.9)) +
     labs(x = NULL, y = "Hazard Rate Ratio(+ 95% CI)",
@@ -148,8 +156,8 @@ plot_point <- function(df, var){
 }
 
 # Figure 1
-plot_1 <- function(low){
-  lin_res %>%
+plot_1 <- function(low, save_p = FALSE){
+  p <- lin_res %>%
     filter(crp == "rev_crp3_f", 
            low == !!low) %>%
     uncount(ifelse(term == "rev_crp3_f1", 2, 1), .id = "id") %>%
@@ -157,33 +165,70 @@ plot_1 <- function(low){
            across(c(beta, lci, uci),  ~ ifelse(tertile == 0, 1, .x))) %>%
     left_join(crp_clean, by = c("tertile" = "group_var")) %>%
     plot_point(crp3_clean)
+  
+  if (save_p == TRUE){
+    ifelse(low == 0.1, "fig1_low", "fig1_all") %>%
+      save_gg(p)
+  }
+  
+  return(p)
 }
 
-plot_1(-Inf)
-plot_1(0.1)
+plot_1(-Inf, TRUE)
+plot_1(0.1, TRUE)
 
 
 # Figure 2
-plot_2 <- function(low, crp){
-  lin_res %>%
+plot_2 <- function(low, crp, save_p = FALSE){
+  p <- lin_res %>%
     filter(str_detect(crp, "log_crp"),
            low == !!low, 
            crp == !!crp) %>%
     plot_point(term_clean)
+  
+  if (save_p == TRUE){
+    case_when(low == 0.1 & crp == "log_crp" ~ "fig2_low_all",
+              low == -Inf & crp == "log_crp" ~ "fig2_all_all",
+              low == 0.1 & crp == "log_crp_lin" ~ "fig2_low_lin",
+              low == -Inf & crp == "log_crp_lin" ~ "fig2_all_lin") %>%
+      save_gg(p)
+  }
+  
+  return(p)
 }
 
 lin_res %>%
   filter(str_detect(crp, "log_crp")) %>%
   distinct(low, crp) %$%
-  map2(low, crp, plot_2)
+  map2(low, crp, plot_2, TRUE)
 
 # Figure 3
-## SPLINES!!
-plot_3 <- function(low){
-  spline_res %>%
+clean_splines <- function(df_res){
+  df_res %>%
+    unnest(res) %>%
+    left_join(df_s, by = "name") %>%
+    group_by(across(-c(name, coef, value))) %>%
+    summarise(estimate = sum(coef*value),
+              .groups = "drop") %>%
+    group_by(across(-c(crp, estimate))) %>%
+    mutate(id = cur_group_id()) %>%
+    ungroup() %>%
     mutate(dep_clean = ifelse(outcome == "hosp", "Hospitalisation", "Death"),
-           across(beta:uci, exp)) %>%
-    filter(!(beta == 0 & lci == 0),
+           estimate = exp(estimate))
+}
+
+spline_obs <- clean_splines(spline_obs)
+
+spline_res <- clean_splines(spline_res)
+
+spline_ci <- spline_res %>%
+  group_by(dep_clean, mod, low, crp) %>%
+  summarise(get_ci(estimate),
+            .groups = "drop")
+
+plot_3 <- function(low, save_p = FALSE){
+  p <- spline_ci %>%
+    filter(!(beta == 1 & lci == 1),
            low == !!low) %>%
     ggplot() +
     aes(x = crp, y = beta, ymin = lci, ymax = uci,
@@ -193,21 +238,59 @@ plot_3 <- function(low){
     geom_ribbon(alpha = 0.2, color = NA) +
     geom_line() +
     scale_y_log10() +
-    scale_color_brewer(palette = "Set1") +
-    scale_fill_brewer(palette = "Set1") +
+    scale_color_brewer(palette = "Dark2") +
+    scale_fill_brewer(palette = "Dark2") +
     theme_minimal() +
     labs(x = "Baseline CRP", y = "Hazard Ratio (+ 95% CI)",
          color = "Model", fill = "Model") +
     theme(legend.position = c(.1, .9))
+  
+  if (save_p == TRUE){
+    ifelse(low == 0.1, "fig3_low", "fig3_all") %>%
+      save_gg(p)
+  }
+  
+  return(p)
 }
 
-plot_3(-Inf)
-ggsave("Images/splines_plot_inf.png",
-       width = 21, height = 9.9, units = "cm")
+plot_3(-Inf, TRUE)
+plot_3(0.1, TRUE)
 
-plot_3(0.1)
-ggsave("Images/splines_plot_01.png",
-       width = 21, height = 9.9, units = "cm")
+# Figure 4
+spline_x <- df_s %>%
+  distinct(crp) %>%
+  slice(which(row_number() %% 10 == 1)) %>%
+  left_join(spline_res, by = "crp")
+
+plot_4 <- function(low, save_p = FALSE){
+  p <- spline_x %>%
+    filter(low == !!low) %>%
+    ggplot() +
+    aes(x = crp, y = estimate, color = mod, fill = mod, group = id) +
+    facet_wrap(~ dep_clean, scales = "free") +
+    geom_hline(yintercept = 1) +
+    geom_line(alpha = 0.1, size = 0.3) +
+    geom_line(data = filter(spline_obs, low == !!low),
+              aes(linetype = mod), size = 1) +
+    scale_y_log10() +
+    scale_color_brewer(palette = "Dark2") +
+    scale_fill_brewer(palette = "Dark2") +
+    theme_minimal() +
+    labs(x = "Baseline CRP", y = "Hazard Ratio (+ 95% CI)",
+         color = "Model", fill = "Model", linetype = "Model") +
+    theme(legend.position = c(.1, .9)) +
+    guides(color = guide_legend(override.aes = list(alpha = 1)))
+  
+  if (save_p == TRUE){
+    ifelse(low == 0.1, "fig4_low", "fig4_all") %>%
+      save_gg(p)
+  }
+  
+  return(p)
+}
+
+plot_4(-Inf, TRUE)
+plot_4(0.1, TRUE)
 
 
 # 5. Regression Tables
@@ -242,14 +325,14 @@ header_lbls <- crp_clean %>%
          log_crp_lin = "Per 1 SD increase\n(Observed)",
          dilut_lin = "Per 1 SD increase\n(Dilution Corrected)"))
 
-get_tbl <- function(low, lin){
+get_tbl <- function(low, lin, file_name = NULL){
   if (lin){
     drop_vars <- c("log_crp", "dilut")
   } else{
     drop_vars <- c("log_crp_lin", "dilut_lin")
   }
   
-  lin_res %>%
+  tbl <- lin_res %>%
     filter(crp != "crp10", low == !!low) %>%
     uncount(ifelse(term == "rev_crp3_f1", 2, 1), .id = "id") %>%
     mutate(term = ifelse(id == 2, "rev_crp3_f0", term),
@@ -265,8 +348,19 @@ get_tbl <- function(low, lin){
            rev_crp3, log_crp, dilut, log_crp_lin, dilut_lin) %>%
     select(-all_of(drop_vars)) %>%
     make_flx(header_lbls)
+  
+  if (!is.null(file_name)){
+    glue("Tables/{file_name}.docx") %>%
+      save_as_docx(tbl, path = .)
+  }
+  
+  return(tbl)
 }
 
 expand_grid(low = c(0.1, -Inf),
-            lin = c(TRUE, FALSE)) %$%
-  map2(low, lin, get_tbl)
+            lin = c(TRUE, FALSE)) %>%
+  mutate(file_name = case_when(low == 0.1 & lin == FALSE ~ "tbl2_low_all",
+                               low == -Inf & lin == FALSE ~ "tbl2_all_all",
+                               low == 0.1 & lin == TRUE ~ "tbl2_low_lin",
+                               low == -Inf & lin == TRUE ~ "tbl2_all_lin")) %$%
+  pmap(list(low, lin, file_name), get_tbl)
