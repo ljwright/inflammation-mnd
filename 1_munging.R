@@ -8,6 +8,7 @@ rm(list = ls())
 
 # 1. Load Data ----
 df <- read_dta("Data/variables for CRP MND paper.dta") %>%
+  full_join(read_dta("Data/liam_12aug21.dta"), by = "eid") %>%
   rename_with(~ str_replace(.x, "crpnew", "crp")) %>%
   rename_with(~ str_replace(.x, "_diag$", "")) %>%
   rename(time_hosp = update_survivaltime_MNDhospdiag,
@@ -22,6 +23,8 @@ df <- read_dta("Data/variables for CRP MND paper.dta") %>%
          crp10 = factor(crp10),
          log_crp_fup = log(crp_fup) %>% wtd_scale(),
          log_crp = log(crp) %>% wtd_scale()) %>%
+  rename(hba1c = HbA1c, hdl = HDL, grip_strength = maxgrip) %>%
+  mutate(hba1c = ifelse(hba1c >= 100, NA, hba1c)) %>%
   select(-log_crp_sd, -admitted_MND_beforebaseline, -ethnic_group,
          -numbertypes_exercise, -smokestatus, -MND, -MND_within3yrs,
          -crp3) %>%
@@ -45,7 +48,9 @@ df <- read_dta("Data/variables for CRP MND paper.dta") %>%
     disadvantaged = "Disadvantaged Neighbourhood",
     rev_crp3 = "CRP Tertiles", crp10 = "CRP Deciles",
     crp_fup = "CRP at Follow-Up", rev_crp3_f = "CRP Tertiles",
-    log_crp_fup = "(Log) CRP at Follow-Up"
+    log_crp_fup = "(Log) CRP at Follow-Up",
+    hba1c = "HbA1c", hdl = "HDL Cholesterol",
+    grip_strength = "Grip Strength"
   ) %>%
   select(eid, matches("crp"), matches("(event|time)"), everything())
 

@@ -1,3 +1,6 @@
+use "L:\David Batty\Data\variables for CRP MND paper.dta", clear
+
+
 *TABLE 1 (based on all those with data on crp)
 ta crpnew3
 su crpnew3 if crpnew3==0 detail
@@ -30,7 +33,7 @@ stset update_survivaltime_MNDhospdiag, failure(update_MNDhospdiag) id(eid)
 
 *adjusted age and sex according to thirds of distribution and SD increase in logged CRP
 
-xi:stcox i.rev_crpnew3 age_assessment female if inMNDinflamm==1
+stcox i.rev_crpnew3 age_assessment female if inMNDinflamm==1
 stcox rev_crpnew3 age_assessment female if  inMNDinflamm==1
 stcox log_crpnew_sd age_assessment female if  inMNDinflamm==1
 
@@ -49,7 +52,7 @@ ta dead_MND rev_crpnew3 if inMNDinflamm==1
 stset survivaltime_dead4oct2020, failure(dead_MND) id(eid)
 
 *adjusted age and sex according to.. (as above)
-xi:stcox i.rev_crpnew3 age_assessment female if inMNDinflamm==1
+stcox i.rev_crpnew3 age_assessment female if inMNDinflamm==1
 stcox rev_crpnew3 age_assessment female if inMNDinflamm==1
 stcox log_crpnew_sd age_assessment female if  inMNDinflamm==1
 

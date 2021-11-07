@@ -35,9 +35,10 @@ crp_clean <- df %>%
 
 # 2. Descriptives ----
 # Get Columns
-desc_vars <- c("rev_crp3", "age", "female", "fev1", "height", "BMI",
-               "nonwhite", "disadvantaged", "currsmok", "low_activity",
-               "vasculardis", "diabetes", "cancer", "seen_psychiatrist")
+desc_vars <- c("rev_crp3", "crp", "age", "female", "fev1", "BMI", "nonwhite",
+               "townsend", "disadvantaged", "currsmok", "low_activity",
+               "vasculardis", "diabetes", "cancer", "seen_psychiatrist",
+               "hba1c", "grip_strength", "hdl")
 
 factor_vars <- c("female", "nonwhite", "disadvantaged", "currsmok",
                  "low_activity", "vasculardis", "diabetes", "cancer",
@@ -53,6 +54,18 @@ pretty_lbls <- look_for(df) %>%
   select(var = variable, label) %>%
   arrange(match(var, desc_vars)) %>%
   add_row(var = "n", label = "N",.before = 1)
+
+# Follow-Up Time
+df %>%
+  filter(inflam == 1) %>%
+  summarise(mean_hosp = mean(time_hosp)/365.25,
+            mean_dead = mean(time_dead)/365.25)
+
+df %>%
+  filter(inflam == 1) %>%
+  group_by(female) %>%
+  summarise(sum_hosp = sum(event_hosp),
+            sum_dead = sum(event_dead))
 
 
 # Create Table
