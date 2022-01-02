@@ -7,6 +7,7 @@ library(officer)
 library(infer)
 library(magrittr)
 library(labelled)
+library(summarytools)
 
 rm(list = ls())
 
@@ -20,32 +21,31 @@ cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73",
                "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
 
 crp_clean <- df %>%
-  filter(inflam == 1) %>%
-  group_by(rev_crp3) %>%
-  summarise(min = min(crp, na.rm = TRUE),
-            max = max(crp, na.rm = TRUE),
-            .groups = "drop") %>%
-  mutate(across(c(min, max), round, 2),
-         crp3_clean = glue("Tertile {rev_crp3+1}\n({min}, {max})"),
-         term = glue("rev_crp3_f{rev_crp3}")) %>%
-  select(group_var = rev_crp3, term, crp3_clean)
+  distinct(crp_3f) %>%
+  arrange(crp_3f) %>%
+  mutate(crp3_clean = str_replace(crp_3f, "\\[", "(") %>%
+           str_replace("\\]", ")"),
+         crp3_clean = glue("Tertile {row_number()}\n{crp3_clean}"),
+         term = glue("crp_3f{crp_3f}")) %>%
+  select(group_var = crp_3f, term, crp3_clean)
 
-# Questions: Why are descriptives and controls different?
+crp_dict <- crp_clean %>%
+  select(-group_var) %>%
+  deframe()
 
 
 # 2. Descriptives ----
 # Get Columns
-desc_vars <- c("rev_crp3", "crp", "age", "female", "fev1", "BMI", "nonwhite",
-               "townsend", "disadvantaged", "currsmok", "low_activity",
+desc_vars <- c("crp_3f", "crp", "age", "female", "fev_1", "bmi", "non_white",
+               "townsend", "disadvantaged", "smoke_status", "low_activity",
                "vasculardis", "diabetes", "cancer", "seen_psychiatrist",
                "hba1c", "grip_strength", "hdl")
 
-factor_vars <- c("female", "nonwhite", "disadvantaged", "currsmok",
+factor_vars <- c("female", "non_white", "disadvantaged",
                  "low_activity", "vasculardis", "diabetes", "cancer",
                  "seen_psychiatrist")
 
 df_desc <- df %>%
-  filter(inflam == 1) %>%
   select(all_of(desc_vars)) %>%
   mutate(across(all_of(factor_vars), as.factor))
 
@@ -57,13 +57,18 @@ pretty_lbls <- look_for(df) %>%
 
 # Follow-Up Time
 df %>%
-  filter(inflam == 1) %>%
-  summarise(mean_hosp = mean(time_hosp)/365.25,
-            mean_dead = mean(time_dead)/365.25)
+  select(time_hosp, time_dead) %>%
+  descr() %>%
+  tb()
+  summarise(mean_hosp = mean(time_hosp),
+            mean_dead = mean(time_dead))
 
 df %>%
-  filter(inflam == 1) %>%
   group_by(female) %>%
+  summarise(sum_hosp = sum(event_hosp),
+            sum_dead = sum(event_dead))
+
+df %>%
   summarise(sum_hosp = sum(event_hosp),
             sum_dead = sum(event_dead))
 
@@ -72,9 +77,7 @@ df %>%
 desc <- list()
 
 get_p <- function(var){
-  df_desc$rev_crp3 <- factor(df_desc$rev_crp3)
-  
-  mod_form <- glue("{var} ~ rev_crp3") %>%
+  mod_form <- glue("{var} ~ crp_3f") %>%
     as.formula()
   
   if (is.numeric(df_desc[[var]])){
@@ -91,21 +94,27 @@ get_p <- function(var){
 }
 
 desc$p <- tibble(var = names(df_desc)) %>%
-  filter(var != "rev_crp3") %>%
+  filter(var != "crp_3f") %>%
   mutate(p = map_dbl(var, get_p),
          p = ifelse(p < 0.0001, "p < 0.0001", round(p, 2)))
 
 
-desc$df <- get_desc(df_desc, group_var = "rev_crp3") %>%
-  filter(var == cat | cat == "1") %>%
+desc$df <- get_desc(df_desc, group_var = "crp_3f") %>%
+  filter(var == cat | cat == "1" | var == "smoke_status") %>%
   left_join(crp_clean, by = "group_var") %>%
   select(crp3_clean, var, string) %>%
   pivot_wider(names_from = crp3_clean, values_from = string) %>%
   left_join(pretty_lbls, by = "var") %>%
   left_join(desc$p, by = "var") %>%
-  mutate(Variable = factor(label, unique(pretty_lbls$label))) %>%
+  mutate(Variable = factor(label, unique(pretty_lbls$label)) )%>%
   select(Variable, 2:4, `p-value` = p)  %>%
-  arrange(Variable)
+  arrange(Variable) %>%
+  unnest(2:4) %>%
+  group_by(Variable) %>%
+  mutate(Variable = ifelse(Variable == "Smoking Status", 
+                           glue("{levels(df$smoke_status)} Smoker"),
+                           as.character(Variable)),
+         `p-value` = ifelse(row_number() == 1, `p-value`, NA))
 
 desc$flx <- make_flx(desc$df) %>%
   align(j = 2:4, align = "center", part = "all")
@@ -125,7 +134,7 @@ get_cor <- function(low, method){
          n = nrow(data))
 }
 
-expand_grid(low = c(-Inf, 0.1),
+expand_grid(low = c(-Inf, 0.15),
             method = c("pearson", "spearman")) %>%
   mutate(res = map2(low, method, get_cor)) %>%
   unnest(res)
@@ -151,36 +160,38 @@ lin_res <- bind_rows(
                        str_replace(term, "log_crp", "dilut"),
                        term),
          term_clean = ifelse(type == "dilut", "Dilution Corrected", "Observed CRP") %>%
-           fct_rev())
+           fct_rev(),
+         mod = ifelse(mod == "Age + Sex", "Age and sex adjusted", "Multiply-adjusted"))
 
 plot_point <- function(df, var){
   ggplot(df) +
     aes(x = {{ var }}, y = beta, ymin = lci, ymax = uci,
-        color = mod) +
-    facet_wrap(~ dep_clean, scales = "free_y") +
+        color = mod, shape = mod) +
+    facet_wrap(~ dep_clean) + #, scales = "free_y") +
     geom_hline(yintercept = 1) +
     geom_pointrange(position = position_dodge(0.5)) +
     scale_y_log10() +
     scale_color_brewer(palette = "Dark2") +
     theme_minimal() +
-    theme(legend.position = c(0.1, 0.9)) +
+    theme(legend.position = "bottom",
+          strip.text = element_text(face = "bold")) +
     labs(x = NULL, y = "Hazard Rate Ratio(+ 95% CI)",
-         color = "Model")
+         color = NULL, shape = NULL)
 }
 
 # Figure 1
 plot_1 <- function(low, save_p = FALSE){
   p <- lin_res %>%
-    filter(crp == "rev_crp3_f", 
+    filter(crp == "crp_3f", 
            low == !!low) %>%
-    uncount(ifelse(term == "rev_crp3_f1", 2, 1), .id = "id") %>%
-    mutate(tertile = ifelse(id == 2, 0, as.numeric(str_sub(term, -1))),
-           across(c(beta, lci, uci),  ~ ifelse(tertile == 0, 1, .x))) %>%
-    left_join(crp_clean, by = c("tertile" = "group_var")) %>%
+    uncount(ifelse(term == glue("crp_3f{levels(df$crp_3f)[2]}"), 2, 1), .id = "id") %>%
+    mutate(crp3_clean = ifelse(id == 2, crp_dict[1], crp_dict[term]),
+           across(c(beta, lci, uci),  ~ ifelse(id == 2, 1, .x)),
+           dep_clean = fct_rev(dep_clean)) %>%
     plot_point(crp3_clean)
   
   if (save_p == TRUE){
-    ifelse(low == 0.1, "fig1_low", "fig1_all") %>%
+    ifelse(low == 0.15, "fig1_low", "fig1_all") %>%
       save_gg(p)
   }
   
@@ -188,7 +199,7 @@ plot_1 <- function(low, save_p = FALSE){
 }
 
 plot_1(-Inf, TRUE)
-plot_1(0.1, TRUE)
+plot_1(0.15, TRUE)
 
 
 # Figure 2
@@ -197,12 +208,13 @@ plot_2 <- function(low, crp, save_p = FALSE){
     filter(str_detect(crp, "log_crp"),
            low == !!low, 
            crp == !!crp) %>%
+    mutate(dep_clean = fct_rev(dep_clean)) %>%
     plot_point(term_clean)
   
   if (save_p == TRUE){
-    case_when(low == 0.1 & crp == "log_crp" ~ "fig2_low_all",
+    case_when(low == 0.15 & crp == "log_crp" ~ "fig2_low_all",
               low == -Inf & crp == "log_crp" ~ "fig2_all_all",
-              low == 0.1 & crp == "log_crp_lin" ~ "fig2_low_lin",
+              low == 0.15 & crp == "log_crp_lin" ~ "fig2_low_lin",
               low == -Inf & crp == "log_crp_lin" ~ "fig2_all_lin") %>%
       save_gg(p)
   }
@@ -243,10 +255,14 @@ plot_3 <- function(low, save_p = FALSE){
   p <- spline_ci %>%
     filter(!(beta == 1 & lci == 1),
            low == !!low) %>%
+    mutate(dep_clean = fct_rev(dep_clean),
+           mod = ifelse(mod == "Age + Sex", 
+                        "Age and sex adjusted", 
+                        "Multiply-adjusted")) %>%
     ggplot() +
     aes(x = crp, y = beta, ymin = lci, ymax = uci,
         color = mod, fill = mod) +
-    facet_wrap(~ dep_clean, scales = "free") +
+    facet_wrap(~ dep_clean) +
     geom_hline(yintercept = 1) +
     geom_ribbon(alpha = 0.2, color = NA) +
     geom_line() +
@@ -255,11 +271,12 @@ plot_3 <- function(low, save_p = FALSE){
     scale_fill_brewer(palette = "Dark2") +
     theme_minimal() +
     labs(x = "Baseline CRP", y = "Hazard Ratio (+ 95% CI)",
-         color = "Model", fill = "Model") +
-    theme(legend.position = c(.1, .9))
+         color = NULL, fill = NULL) +
+    theme(legend.position = "bottom",
+          strip.text = element_text(face = "bold"))
   
   if (save_p == TRUE){
-    ifelse(low == 0.1, "fig3_low", "fig3_all") %>%
+    ifelse(low == 0.15, "fig3_low", "fig3_all") %>%
       save_gg(p)
   }
   
@@ -267,13 +284,15 @@ plot_3 <- function(low, save_p = FALSE){
 }
 
 plot_3(-Inf, TRUE)
-plot_3(0.1, TRUE)
+plot_3(0.15, TRUE)
 
 # Figure 4
 spline_x <- df_s %>%
   distinct(crp) %>%
   slice(which(row_number() %% 10 == 1)) %>%
   left_join(spline_res, by = "crp")
+
+rm(spline_res, clean_splines)
 
 plot_4 <- function(low, save_p = FALSE){
   p <- spline_x %>%
@@ -295,7 +314,7 @@ plot_4 <- function(low, save_p = FALSE){
     guides(color = guide_legend(override.aes = list(alpha = 1)))
   
   if (save_p == TRUE){
-    ifelse(low == 0.1, "fig4_low", "fig4_all") %>%
+    ifelse(low == 0.15, "fig4_low", "fig4_all") %>%
       save_gg(p)
   }
   
@@ -303,18 +322,18 @@ plot_4 <- function(low, save_p = FALSE){
 }
 
 plot_4(-Inf, TRUE)
-plot_4(0.1, TRUE)
+plot_4(0.15, TRUE)
 
+rm(spline_x, spline_ci, spline_obs)
 
 # 5. Regression Tables
 n_events <- df %>%
-  filter(inflam == 1) %>%
-  select(all_of(covars[[2]]), matches("(time|event)"), rev_crp3) %>%
+  select(all_of(covars[[2]]), matches("(time|event)"), crp_3f) %>%
   drop_na() %>%
-  select(rev_crp3, matches("event")) %>%
-  pivot_longer(-rev_crp3, names_to = "var") %>%
-  count(rev_crp3, var, value) %>%
-  add_count(rev_crp3, var, wt = n, name = "total") %>%
+  select(crp_3f, matches("event")) %>%
+  pivot_longer(-crp_3f, names_to = "var") %>%
+  count(crp_3f, var, value) %>%
+  add_count(crp_3f, var, wt = n, name = "total") %>%
   filter(value == 1) %>%
   mutate(across(c(n, total), 
                 ~ format(.x, big.mark = ",") %>%
@@ -322,17 +341,18 @@ n_events <- df %>%
          string = glue("{n} / {total}"),
          outcome = str_replace(var, "event_", ""),
          dep_clean = ifelse(outcome == "hosp", "Hospitalisation", "Death"),
-         term = glue("rev_crp3_f{rev_crp3}"),
+         term = glue("crp_3f{crp_3f}"),
          mod = "# Events / N") %>%
   select(dep_clean, mod, term, string)
 
 header_lbls <- crp_clean %>%
-  select(2:3) %>% 
+  mutate(term = glue("crp_3f{row_number()}")) %>%
+  select(term, crp3_clean) %>% 
   deframe() %>% 
   as.list() %>%
   c(list(dep_clean = "Outcome",
          mod = "",
-         rev_crp3 = "p-value for trend",
+         crp_3 = "p-value for trend",
          log_crp = "Per 1 SD increase\n(Observed)",
          dilut = "Per 1 SD increase\n(Dilution Corrected)",
          log_crp_lin = "Per 1 SD increase\n(Observed)",
@@ -347,18 +367,20 @@ get_tbl <- function(low, lin, file_name = NULL){
   
   tbl <- lin_res %>%
     filter(crp != "crp10", low == !!low) %>%
-    uncount(ifelse(term == "rev_crp3_f1", 2, 1), .id = "id") %>%
-    mutate(term = ifelse(id == 2, "rev_crp3_f0", term),
-           across(c(beta, lci, uci), 
-                  ~ ifelse(term == "rev_crp3_f0", 1, .x)),
+    uncount(ifelse(term == glue("crp_3f{levels(df$crp_3f)[2]}"), 2, 1), .id = "id") %>%
+    mutate(term = ifelse(id == 2, crp_clean$term[1], term),
+           across(c(beta, lci, uci),  ~ ifelse(id == 2, 1, .x)),
            across(beta:uci, round, 2),
-           string = ifelse(term == "rev_crp3", p, glue("{beta} ({lci}, {uci})"))) %>%
+           string = ifelse(term == "crp_3", p, glue("{beta} ({lci}, {uci})"))) %>%
     select(dep_clean, mod, term, string) %>%
-    bind_rows(n_events) %>%
+    bind_rows(n_events) %>% 
+    mutate(term = ifelse(str_detect(term, "^crp_3f"), 
+                         glue("crp_3f{match(term, crp_clean$term)}"),
+                         term)) %>%
     pivot_wider(names_from = term, values_from = string) %>%
     arrange(desc(dep_clean), mod) %>%
-    select(dep_clean, mod, rev_crp3_f0, rev_crp3_f1, rev_crp3_f2,
-           rev_crp3, log_crp, dilut, log_crp_lin, dilut_lin) %>%
+    select(dep_clean, mod, crp_3f1, crp_3f2, crp_3f3,
+           crp_3, log_crp, dilut, log_crp_lin, dilut_lin) %>%
     select(-all_of(drop_vars)) %>%
     make_flx(header_lbls)
   
@@ -370,10 +392,10 @@ get_tbl <- function(low, lin, file_name = NULL){
   return(tbl)
 }
 
-expand_grid(low = c(0.1, -Inf),
+expand_grid(low = c(0.15, -Inf),
             lin = c(TRUE, FALSE)) %>%
-  mutate(file_name = case_when(low == 0.1 & lin == FALSE ~ "tbl2_low_all",
+  mutate(file_name = case_when(low == 0.15 & lin == FALSE ~ "tbl2_low_all",
                                low == -Inf & lin == FALSE ~ "tbl2_all_all",
-                               low == 0.1 & lin == TRUE ~ "tbl2_low_lin",
+                               low == 0.15 & lin == TRUE ~ "tbl2_low_lin",
                                low == -Inf & lin == TRUE ~ "tbl2_all_lin")) %$%
   pmap(list(low, lin, file_name), get_tbl)

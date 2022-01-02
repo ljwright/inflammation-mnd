@@ -7,7 +7,7 @@ library(broom)
 
 rm(list = ls())
 
-options(scipen=999)
+options(scipen = 999)
 
 # 1. Load Data ----
 df_raw <- read_csv("Data/Cgale_211117_data.csv", guess_max = 502421) %>%
@@ -28,16 +28,15 @@ write_csv(fields, file = "Data/missingness.csv")
 
 
 # 2. Find Variables ----
-#https://biobank.ndph.ox.ac.uk/showcase/field.cgi?id=20116
 load("Data/df_raw.Rdata")
 
 # fields %>%
 #   select(fid, fname, miss, lbl_lower) %>%
 #   filter(str_detect(lbl_lower, "activ")) %>% View()
 
+#https://biobank.ndph.ox.ac.uk/showcase/field.cgi?id=20116
 
 # 3. Clean Dataset ----
-
 # Baseline Diagnosis
 df_baseline <- df_raw %>%
   select(id = EID, matches("v20002_0")) %>%
@@ -61,9 +60,10 @@ df_hosp <- df_raw %>%
   mutate(date_hosp = as.Date(date_hosp, format = "%Y-%m-%d"),
          date_max = max(date_hosp, na.rm = TRUE)) %>%
   filter(diag_hosp == "G122") %>%
-  group_by(id) %>%
-  filter(date_hosp == min(date_hosp)) %>%
-  ungroup() %>%
+  arrange(id, date_hosp) %>%
+  group_by(id, date_max) %>%
+  summarise(date_hosp = min(date_hosp),
+            .groups = "drop") %>%
   mutate(event_hosp = 1) %>%
   full_join(df_raw %>%
               select(id = EID),
@@ -148,44 +148,78 @@ df_new <- df_baseline %>%
 
 gc()
 
+save(df_new, file = "Data/df_new.Rdata")
+
+
 # 4. Exclude Participants ---- 
-vars <- c("time_dead", "time_hosp",
-          "event_hosp", "event_dead",
-          "crp", "age", 
-          "female", "vasculardis",
-          "diabetes", "cancer", "fev_1", 
-          "townsend", "bmi", "smoke_status",
-          "non_white", "seen_psychiatrist",
-          "low_activity")
+load("Data/df_new.Rdata")
+
+covars <- lst("Age + Sex" = c("age", "female"),
+              "Multiply-Adjusted" = c(`Age + Sex`,
+                                      "vasculardis", "diabetes", "cancer",
+                                      "fev_1", "townsend", "bmi",
+                                      "smoke_status", "non_white",
+                                      "seen_psychiatrist", "low_activity"),
+              "Fully-Adjusted" = c(`Multiply-Adjusted`, 
+                                   "hdl", "hba1c", "grip_strength"))
+save(covars, file = "Data/model_covars.Rdata")
+
+vars <- map(covars, ~ c(.x,c("time_dead", "event_dead",
+                               "time_hosp", "event_hosp",
+                               "crp")))
 
 df_exclude <- df_new %>%
-  mutate(n_baseline = sum(baseline_diag, na.rm = TRUE)) %>%
+  add_count(name = "n_all") %>%
   filter(baseline_diag == 0) %>%
-  mutate(n_3years = sum(between(time_hosp, 0, 3), na.rm = TRUE)) %>%
-  filter(time_hosp > 3) %>%
-  mutate(n_crp10 = sum(crp >= 10, na.rm = TRUE)) %>%
-  filter(crp < 10) %>%
-  mutate(across(all_of(vars), ~ ifelse(is.na(.x), 1, 0))) %>%
-  rowwise() %>%
-  mutate(any_miss = sum(c_across(all_of(vars)))) %>%
-  ungroup() %>%
-  mutate(n_miss = sum(any_miss > 0)) %>%
-  filter(any_miss == 0) %>%
+  add_count(name = "n_baseline") %>%
+  mutate(within_3years = case_when(between(time_hosp, 0, 3) & event_hosp == 1 ~ 1,
+                                   between(time_dead, 0, 3) & event_dead == 1 ~ 1,
+                                   TRUE ~ 0)) %>%
+  filter(within_3years == 0) %>%
+  add_count(name = "n_3years") %>%
+  filter(is.na(crp) | crp < 10) %>%
+  add_count(name = "n_crp10") %>%
+  filter(!is.na(crp)) %>%
+  add_count(name = "n_crp_miss") %>%
+  drop_na(all_of(vars[[2]])) %>%
+  add_count(name = "n_miss") %>%
   select(id, matches("^n_"))
 
+# Missingness
+get_n <- function(df){
+  df %>%
+    distinct(across(matches("^n_"))) %>%
+    pivot_longer(everything(), names_to = "sample", values_to = "n") %>%
+    mutate(drop_n = lag(n) - n,
+           drop_p = drop_n*100/lag(n),
+           p = n*100/first(n),
+           across(c(drop_p, p), round, 2))
+}
+
+get_n(df_exclude)
 
 df_new %>%
-  mutate(n_baseline = sum(baseline_diag, na.rm = TRUE)) %>%
-  filter(baseline_diag == 0) %>%
-  mutate(n_3years = sum(between(time_hosp, 0, 3), na.rm = TRUE)) %>%
-  filter(time_hosp > 3) %>%
-  mutate(n_crp10 = sum(crp >= 10, na.rm = TRUE)) %>%
-  filter(crp < 10) %>%
-  mutate(across(all_of(vars), ~ ifelse(is.na(.x), 1, 0)))  %>%
-  summarise(across(all_of(vars), sum))
+  drop_na(all_of(vars[[3]])) %>%
+  add_count(name = "n_miss_all") %>%
+  select(id, n_miss_all) %>%
+  inner_join(df_exclude, ., by = "id") %>%
+  get_n()
+  
+df_new %>%
+  drop_na(crp_fup) %>%
+  count()
 
-df_exclude %>%
-  distinct(across(matches("^n_")))
+df_new %>%
+  semi_join(df_exclude, by = "id") %>%
+  drop_na(crp_fup) %>%
+  count()
+
+df_new %>%
+  select(id, all_of(vars[[3]])) %>%
+  mutate(across(-id, ~ ifelse(is.na(.x), 1, 0))) %>%
+  pivot_longer(-id) %>%
+  filter(value == 1) %>%
+  count(name)
 
 df_new %>%
   semi_join(df_exclude, by = "id") %>%
@@ -202,7 +236,7 @@ clean_lbls <- c(
   event_dead = "Died of MND",
   time_dead = "Follow-Up Time (Death)",
   crp = "C-Reactive Protein", log_crp = "Log CRP",
-  crp_3f = "CRP Tertiles", crp_3f = "CRP Tertiles",
+  crp_3 = "CRP Tertiles", crp_3f = "CRP Tertiles",
   crp_10f = "CRP Deciles",
   crp_fup = "CRP at Follow-Up",
   log_crp_fup = "(Log) CRP at Follow-Up",
