@@ -74,10 +74,10 @@ main_res <- reg_grid %>%
   mutate(res = map(spec_id, get_cox)) %>%
   unnest(res)
 
-main_res_covars <- reg_grid %>%
+main_res_covars <- main_res %>%
   filter(!str_detect(term, crp))
 
-main_res <- reg_grid %>%
+main_res <- main_res %>%
   filter(str_detect(term, crp))
 
 
@@ -297,14 +297,23 @@ save(delta_res, df_s, file = "Data/delta_results.Rdata")
 # 5. Prospective Analysis of CRP
 load("Data/df_new.Rdata")
 
-df_mnd <- df_new %>% 
-  filter(baseline_diag == 1 | (event_hosp == 1 & time_hosp <= 5)) %>%
-  mutate(log_crp = log(crp) %>% wtd_scale()) %>%
-  select(id, died, event_dead, time_dead, 
-         log_crp, age, female) %>%
-  drop_na()
+get_pros <- function(max_years){
+  df_mnd <- df_new %>% 
+    filter(baseline_diag == 1 | (event_hosp == 1 & time_hosp <= !!max_years)) %>%
+    mutate(log_crp = log(crp) %>% wtd_scale()) %>%
+    select(id, died, event_dead, time_dead, 
+           log_crp, age, female) %>%
+    drop_na()
+  
+  mod <- coxph(Surv(time_dead, event_dead) ~ log_crp + age + female,
+                    df_mnd, method = "breslow")
+  
+  tidy(mod, conf.int = TRUE, exponentiate = TRUE) %>%
+    mutate(nobs = glance(mod)$n,
+           events = glance(mod)$nevent)
+}
 
-pros_mod <- coxph(Surv(time_dead, event_dead) ~ log_crp + age + female,
-      df_mnd, method = "breslow") %>%
-  tidy(conf.int = TRUE, exponentiate = TRUE)
-save(pros_mod, file = "Data/prospective_results.Rdata")
+pros_res <- tibble(max_years = 1:10) %>%
+  mutate(res = map(max_years, get_pros)) %>%
+  unnest(res)
+save(pros_res, file = "Data/prospective_results.Rdata")
